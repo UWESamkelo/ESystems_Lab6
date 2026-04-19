@@ -1,0 +1,164 @@
+/* Title: Connecting an LCD Display to the Smart Home System Using the I2C Bus
+Author: Samkelo Mareka
+Date: 28/03/2026
+Student ID: 24004894
+*/
+
+#include "mbed.h"
+#include "display.h"      
+#include "matrix_pad.h"   
+#include <string.h>
+#include <stdio.h>
+#include <chrono>         
+
+using namespace std::chrono;
+
+// Hardware Configuration
+AnalogIn tempSensor(A0);
+DigitalIn gasSensor(D2);
+
+// System Variables
+Timer reportTimer;
+bool activeAlarm = true;
+const char secretCode[] = "12345";
+char inputBuffer[6];
+int bufferIndex = 0;
+bool detection = false;
+
+// Functions
+void updateDisplayPrompt() {
+    displayClear();
+    displayCharPositionWrite(0, 0); 
+    
+    // The prompt changes based on the FSM State
+    if (activeAlarm) {
+        displayStringWrite("Code to Disarm: ");
+    } else {
+        displayStringWrite("System Normal");
+        displayCharPositionWrite(0, 1);
+        displayStringWrite("4:Gas 5:Temp");
+    }
+}
+
+void checkSafety() {
+    float tempC = tempSensor.read() * 100.0f; 
+    
+    // Check if limits are currently exceeded
+    bool currentHazard = (tempC > 35.0f || gasSensor.read() == 1);
+
+    // If a hazard just appeared (Edge trigger)
+    if (currentHazard && !detection) {
+        activeAlarm = true;       // 1. RE-ARM THE ALARM
+        detection = true;           // 2. Remember that we saw it
+        bufferIndex = 0;            // 3. Clear any half-typed passcodes
+
+        displayClear();
+        displayCharPositionWrite(0, 0);
+        displayStringWrite("!! WARNING !!");
+        displayCharPositionWrite(0, 1); 
+        displayStringWrite(gasSensor.read() ? "GAS DETECTED" : "OVER TEMP");
+        
+        ThisThread::sleep_for(2s); 
+        updateDisplayPrompt(); // This will now correctly display "Code to Disarm:"
+    } 
+    // If the room is safe again, reset the trigger so it can detect future hazards
+    else if (!currentHazard && detection) {
+        detection = false;
+    }
+}
+
+int main() {
+    // Initialization
+    displayInit(DISPLAY_CONNECTION_I2C_PCF8574_IO_EXPANDER);
+    matrixKeypadInit(50); // Pass polling time parameter
+    
+    updateDisplayPrompt();
+    reportTimer.start();
+
+    while (true) {
+        char key = matrixKeypadUpdate(); 
+        
+        if (key != '\0') {
+            // ==========================================
+            // STATE 1: ALARM IS ACTIVE (Passcode Mode)
+            // ==========================================
+            if (activeAlarm) {
+                if (key >= '0' && key <= '9') {
+                    inputBuffer[bufferIndex++] = key;
+                    
+                    // Optional: Visual feedback while typing
+                    displayClear();
+                    displayCharPositionWrite(0, 0);
+                    displayStringWrite("Entering...");
+                    
+                    if (bufferIndex == 5) {
+                        inputBuffer[5] = '\0'; // Null terminate to compare strings
+                        if (strcmp(inputBuffer, secretCode) == 0) {
+                            activeAlarm = false;
+                            displayClear();
+                            displayCharPositionWrite(0, 0);
+                            displayStringWrite("ALARM OFF");
+                            ThisThread::sleep_for(2s);
+                            updateDisplayPrompt();
+                        } else {
+                            displayClear();
+                            displayCharPositionWrite(0, 0);
+                            displayStringWrite("WRONG CODE");
+                            ThisThread::sleep_for(2s);
+                            updateDisplayPrompt();
+                        }
+                        bufferIndex = 0; // Reset buffer for the next attempt
+                    }
+                }
+            } 
+            // ==========================================
+            // STATE 2: ALARM IS OFF (Status Report Mode)
+            // ==========================================
+            else {
+                if (key == '4') {
+                    displayClear();
+                    displayCharPositionWrite(0, 0);
+                    displayStringWrite("Gas: ");
+                    displayStringWrite(gasSensor.read() ? "DETECTED" : "CLEAN");
+                    ThisThread::sleep_for(2s);
+                    updateDisplayPrompt();
+                } 
+                else if (key == '5') {
+                    // Mbed float-to-string workaround
+                    float currentTemp = tempSensor.read() * 100.0f;
+                    int wholePart = (int)currentTemp; 
+                    int decimalPart = (int)((currentTemp - wholePart) * 10); 
+                    
+                    char tStr[16];
+                    sprintf(tStr, "Temp: %d.%d C", wholePart, decimalPart);
+                    
+                    displayClear();
+                    displayCharPositionWrite(0, 0);
+                    displayStringWrite(tStr);
+                    ThisThread::sleep_for(2s);
+                    updateDisplayPrompt();
+                }
+            }
+        }
+
+        // ==========================================
+        // 1-Minute Periodic Report
+        // ==========================================
+        if (duration_cast<seconds>(reportTimer.elapsed_time()).count() >= 60) {
+            displayClear();
+            displayCharPositionWrite(0, 0);
+            displayStringWrite("System Status:");
+            displayCharPositionWrite(0, 1);
+            displayStringWrite(activeAlarm ? "ALARM: ACTIVE" : "ALARM: OFF");
+            reportTimer.reset();
+            ThisThread::sleep_for(3s);
+            updateDisplayPrompt();
+        }
+
+        // Check hardware limits
+        checkSafety();
+
+        // Main loop polling delay
+        ThisThread::sleep_for(50ms); 
+    }
+}
